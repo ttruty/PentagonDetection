@@ -2,7 +2,7 @@
 from skimage.transform import pyramid_gaussian
 from skimage.io import imread
 from skimage.feature import hog
-from sklearn.externals import joblib
+import joblib
 from sklearn.decomposition import PCA
 import cv2, os, time, math, itertools, random
 import numpy as np
@@ -55,7 +55,7 @@ def black_pixels(img):
     cv_skel = img_as_ubyte(skel)
     match_p = np.where(skel == 1)
 
-    im2, contours, hierarchy = cv2.findContours(cv_skel, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)  #
+    contours, hierarchy = cv2.findContours(cv_skel, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)  #
 
     all_cnt_p = []
     x = match_p[0]
@@ -70,7 +70,8 @@ def black_pixels(img):
         area = cv2.contourArea(hull)
         if area > 25:
             for i in black_coords:
-                inside = cv2.pointPolygonTest(cnt, (i[1], i[0]), False)
+                pt = tuple((i[1], i[0]))
+                inside = cv2.pointPolygonTest(cnt, pt, False)
                 if inside != -1:
                     edit_black.append((i[0], i[1]))
     return edit_black
@@ -155,7 +156,7 @@ def detection(img):
     opening = cv2.morphologyEx(thesh_image, cv2.MORPH_OPEN, kernel)
     opening = cv2.resize(opening, (128, 128))
 
-    fd, _ = hog(opening, 9, (8, 8), (3, 3), visualise=True,
+    fd, _ = hog(opening, 9, (8, 8), (3, 3), visualize=True,
                 transform_sqrt=True)  # defined parameters for the HOG method
     return clf.decision_function([fd])
 
@@ -165,6 +166,7 @@ def find_contours(path, corners, quality, distance, detection_threshold):
     cv2 contour finding to get the shapes on page according to the black pixels
     '''
     found_dets = []
+    bounding_boxes = []
     output_image = np.zeros((100, 100, 3), np.uint8) # blank image as placeholder
 
     im = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
@@ -176,22 +178,22 @@ def find_contours(path, corners, quality, distance, detection_threshold):
     group_x = []
     group_y = []
 
-    cv2.imshow('before canny image', img)
+    #cv2.imshow('before canny image', img)
 
     blur = cv2.GaussianBlur(im, (5, 5), 0)
     ret3, th3 = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     edges = cv2.Canny(img, 0, 255, apertureSize=3)  # Canny image
 
-    cv2.imshow('after canny image', edges)
-    cv2.waitKey()
+    #cv2.imshow('after canny image', edges)
+    #cv2.waitKey()
 
     kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))  # create the kernle
     edges = cv2.dilate(edges, kernel, iterations=5)
 
 
 
-    im2, contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)  # find each contour
+    contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)  # find each contour
     cv2.drawContours(clone, contours, -1, (0, 255, 0), 3)  # draw all contours
 
     found_cnts = []
@@ -200,6 +202,8 @@ def find_contours(path, corners, quality, distance, detection_threshold):
 
     # DRAW Contours
     cv2.drawContours(edges, contours, -1, (0, 255, 255), 3)
+    all_boudning_boxes = []
+
     for cnt in contours:
         # get the perimeter circularity of the contours
         hull = cv2.convexHull(cnt)
@@ -210,6 +214,7 @@ def find_contours(path, corners, quality, distance, detection_threshold):
         if perimeter != 0:
             x, y, w, h = cv2.boundingRect(cnt)
             # cv2.rectangle(img, (x, y), (x + w, y + h), (0, 167, 120), 2)
+            all_boudning_boxes.append((x, y, w, h))
             if (h * w) > 3000:  # minimum area of the contour bounding box
                 feature = im[y:y + h, x:x + w] # feature is crop of contour
                 features.append(feature) # add the feature to list of features
@@ -242,11 +247,24 @@ def find_contours(path, corners, quality, distance, detection_threshold):
                 found_dets.remove(small) # remove the smaller detections from the larger
     for i in found_dets:
         x, y, _, w, h = i
+        bounding_boxes.append((x, y, w, h))
 
         output_image = img[y:y + h, x:x + w] #save the image in output with filename
 
+        # check if the bounding box is inside the final detection box
+        for j in all_boudning_boxes:
+            x1, y1, w1, h1 = j
+            if (x < x1 < x + w and y < y1 < y + h):
+                bounding_boxes.append((x1, y1, w1, h1))
 
-    return img, found_dets, output_image
+    # draw bounding boxes on image
+    bounding_box_image = img.copy()
+    for i in bounding_boxes:
+        x, y, w, h = i
+        cv2.rectangle(bounding_box_image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+
+    return img, found_dets, output_image, bounding_boxes, bounding_box_image
 
 def inside_contours(image):
     '''
@@ -443,19 +461,19 @@ def hough_lines(img, line_thresh, line_length, line_gap):
         line_data = []
 
     # sort lines by angle
-    line_dict.sort(key=itemgetter("angle"))
-    # turn line dict into dataframe
-    df = pd.DataFrame(line_dict)
-    clone = np.zeros((800, 800, 3), np.uint8)
-    clone.fill(255)
-    distilled_lines = []
-    # bin lines with slope within 20 degress
-    bins = list(range(0, 361, 30))  # used for binning slopes withing 20 degrees
-    groups = [x for x in range(len(bins) - 1)]
-    categories = pd.cut(df['angle'], bins, labels=groups)
-    df['categories'] = pd.cut(df['angle'], bins, labels=groups)
-    df['scoresBinned'] = pd.cut(df['angle'], bins)
-    grouped = df.groupby("categories")
+    # line_dict.sort(key=itemgetter("angle"))
+    # # turn line dict into dataframe
+    # df = pd.DataFrame(line_dict)
+    # clone = np.zeros((800, 800, 3), np.uint8)
+    # clone.fill(255)
+    # distilled_lines = []
+    # # bin lines with slope within 20 degress
+    # bins = list(range(0, 361, 30))  # used for binning slopes withing 20 degrees
+    # groups = [x for x in range(len(bins) - 1)]
+    # categories = pd.cut(df['angle'], bins, labels=groups)
+    # df['categories'] = pd.cut(df['angle'], bins, labels=groups)
+    # df['scoresBinned'] = pd.cut(df['angle'], bins)
+    # grouped = df.groupby("categories")
     cluster_lines = [] # Placeholder for cluster groups
 
     return corrected_lines, cluster_lines
@@ -488,6 +506,9 @@ def shiCorners(img, corners, quality, distance):
     skel = skeletonize(binary)
     skel = img_as_ubyte(skel)
     goodcorners = cv2.goodFeaturesToTrack(skel, corners, quality, distance)
+    # check if good corners is empty
+    if goodcorners is None:
+        return []
     goodcorners = np.int0(goodcorners)  # cast corners to int, needed to plot
 
     for i in goodcorners:
